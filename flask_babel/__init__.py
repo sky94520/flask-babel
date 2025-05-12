@@ -9,7 +9,9 @@
 """
 
 import os
+from gettext import GNUTranslations
 from dataclasses import dataclass
+from importlib import resources
 from types import SimpleNamespace
 from datetime import datetime
 from contextlib import contextmanager
@@ -34,6 +36,7 @@ class BabelConfiguration:
     default_domain: str
     default_directories: List[str]
     translation_directories: List[str]
+    plugin_translation_packages: List[str]
 
     instance: "Babel"
 
@@ -129,6 +132,7 @@ class Babel:
             default_domain=app.config.get("BABEL_DOMAIN", default_domain),
             default_directories=directories,
             translation_directories=list(self._resolve_directories(directories, app)),
+            plugin_translation_packages=list(),
             instance=self,
             locale_selector=locale_selector,
             timezone_selector=timezone_selector,
@@ -565,10 +569,14 @@ class Domain(object):
         )
     """
 
-    def __init__(self, translation_directories=None, domain="messages"):
+    def __init__(self, translation_directories=None, plugin_translation_packages=None, domain="messages"):
         if isinstance(translation_directories, str):
             translation_directories = [translation_directories]
         self._translation_directories = translation_directories
+
+        if isinstance(plugin_translation_packages, str):
+            plugin_translation_packages = [plugin_translation_packages]
+        self._plugin_translation_packages = plugin_translation_packages
 
         self.domain = domain.split(";")
 
@@ -582,6 +590,12 @@ class Domain(object):
         if self._translation_directories is not None:
             return self._translation_directories
         return get_babel().translation_directories
+
+    @property
+    def plugin_translation_packages(self):
+        if self._plugin_translation_packages is not None:
+            return self._plugin_translation_packages
+        return get_babel().plugin_translation_packages
 
     def as_default(self):
         """Set this domain as default for the current request"""
@@ -621,6 +635,23 @@ class Domain(object):
                 # `support.Translations.merge` entirely.
                 if catalog.info() and hasattr(catalog, "plural"):
                     translations.plural = catalog.plural
+            for pkg in self.plugin_translation_packages:
+                try:
+                    mo_path = (
+                        resources.files(pkg)
+                        .joinpath(f"translations/{locale}/LC_MESSAGES/{self.domain[0]}.mo")
+                    )
+                    with mo_path.open("rb") as f:
+                        plugin_trans = GNUTranslations(f)
+                        translations.merge(plugin_trans)
+
+                        # 同样处理 plural 问题
+                        if plugin_trans.info() and hasattr(plugin_trans, "plural"):
+                            translations.plural = plugin_trans.plural
+                except FileNotFoundError:
+                    continue
+                except Exception as e:
+                    print(f"[plugin translation] failed to load from {pkg}: {e}")
 
             cache[str(locale), self.domain[0]] = translations
             return translations
